@@ -127,6 +127,9 @@ pub fn run() {
             cancel_capture
         ])
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_icon(tauri::include_image!("icons/128x128.png"))?;
+            }
             let path = app.path().app_config_dir()?.join("settings.json");
             let mut settings = match fs::read(&path) {
                 Ok(data) => serde_json::from_slice::<Settings>(&data)
@@ -157,7 +160,7 @@ pub fn run() {
                 tauri::menu::MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
             let menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
             tauri::tray::TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tauri::include_image!("icons/tray.png"))
                 .tooltip("Mouse Modes")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
