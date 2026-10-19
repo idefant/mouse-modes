@@ -21,6 +21,7 @@ import {
 } from "./settings";
 import type { EngineStatus, Hotkey, Mode, Settings } from "./settings";
 import styles from "./App.module.scss";
+import { CaptureSession } from "./captureSession";
 const modes = [
   {
     id: "slow",
@@ -60,7 +61,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [preparing, setPreparing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const recordingRef = useRef<Mode | null>(null);
+  const captureSession = useRef(new CaptureSession());
   const settingsRef = useRef<Settings | null>(null);
   const applyRef = useRef<(next: Settings) => Promise<void>>(async () => {});
   async function apply(next: Settings) {
@@ -86,8 +87,8 @@ export default function App() {
     void (async () => {
       try {
         const unlisten = await listen<Hotkey>("hotkey-captured", (event) => {
-          const mode = recordingRef.current;
-          recordingRef.current = null;
+          const mode = captureSession.current.complete();
+          setPreparing(false);
           setRecording(null);
           if (mode && settingsRef.current) {
             const hotkey = hotkeySchema.parse(event.payload);
@@ -108,17 +109,9 @@ export default function App() {
             if (mounted) {
               const next = statusSchema.parse(event.payload);
               setStatus(next);
-              if (!next.capturing && !next.available) {
-                recordingRef.current = null;
-                setRecording(null);
-                setPreparing(false);
-              }
-              if (
-                !next.capturing &&
-                recordingRef.current &&
-                !next.message.includes("Waiting")
-              ) {
-                recordingRef.current = null;
+              const phase = captureSession.current.observe(next);
+              if (phase === "active") setPreparing(false);
+              if (phase === "ended") {
                 setRecording(null);
                 setPreparing(false);
               }
@@ -148,14 +141,15 @@ export default function App() {
   }, []);
   async function capture(mode: Mode) {
     setError("");
-    recordingRef.current = mode;
+    const captureId = captureSession.current.start(mode);
     setRecording(mode);
     setPreparing(true);
     try {
       await invoke("begin_capture");
-      setPreparing(false);
+      if (captureSession.current.acknowledge(captureId)) setPreparing(false);
     } catch (e) {
-      recordingRef.current = null;
+      if (!captureSession.current.isCurrent(captureId)) return;
+      captureSession.current.cancel();
       setRecording(null);
       setPreparing(false);
       setError(String(e));
@@ -164,8 +158,9 @@ export default function App() {
   async function cancel() {
     try {
       await invoke("cancel_capture");
-      recordingRef.current = null;
+      captureSession.current.cancel();
       setRecording(null);
+      setPreparing(false);
     } catch (e) {
       setError(String(e));
     }
