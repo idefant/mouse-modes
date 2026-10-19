@@ -8,6 +8,8 @@
 
 Обычное закрытие окна прячет его. Клик по значку трея открывает меню «Настройки / Выход». Автозапуск открывает программу скрытой в трее. В некоторых Linux панелях левый клик обрабатывается самой панелью: меню Tauri предоставлено через StatusNotifier/AppIndicator.
 
+На текущей Linux-машине готовый тестовый исполняемый файл: `./src-tauri/target/debug/mouse-modes` (автономная debug-сборка с встроенным интерфейсом, не требует Vite).
+
 ## Разработка и сборка
 
 Нужны Node.js 22.12+ и Rust stable. Linux: GTK3, WebKitGTK 4.1, AppIndicator, Python 3, python-evdev, polkit. На Arch/Omarchy: `webkit2gtk-4.1 libappindicator-gtk3 python-evdev polkit`. Windows: Visual Studio C++ Build Tools и WebView2.
@@ -17,7 +19,7 @@ npm ci
 npm run tauri dev
 npm run check
 npm test
-python3 linux/test_helper.py # Linux
+python3 -m unittest discover -s linux -v # Linux
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri build -- --no-bundle
 # Установщик для текущей ОС:
