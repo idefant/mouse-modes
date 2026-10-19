@@ -174,6 +174,7 @@
   border-radius: 6px;
   width: 30px;
   height: 32px;
+  flex-shrink: 0;
   display: grid;
   place-items: center;
   padding: 0;
@@ -212,6 +213,7 @@
 .switch {
   width: 37px;
   height: 22px;
+  flex-shrink: 0;
   border-radius: 20px;
   border: 1px solid #4f5851;
   background: #343b36;
@@ -295,5 +297,44 @@
 
   .chord {
     max-width: 150px;
+  }
+}
+
+@media (width <= 480px) {
+  .row {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    gap: 10px 12px;
+    align-items: start;
+    padding: 16px 14px;
+  }
+
+  .controls {
+    grid-column: 2;
+    min-width: 0;
+  }
+
+  .chord {
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+    justify-content: flex-start;
+  }
+
+  .empty {
+    flex: 1;
+  }
+
+  .startup {
+    gap: 14px;
+  }
+
+  :global(footer) {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .status {
+    max-width: 100%;
   }
 }

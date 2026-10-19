@@ -1,1 +1,40 @@
-{"$schema":"https://schema.tauri.app/config/2","productName":"Mouse Modes","version":"0.1.0","identifier":"dev.mouse-modes.app","build":{"beforeDevCommand":"npm run dev","devUrl":"http://localhost:1420","beforeBuildCommand":"npm run build","frontendDist":"../dist"},"app":{"windows":[{"title":"Mouse Modes","width":760,"height":810,"minWidth":590,"minHeight":740,"backgroundColor":"#151719"}],"security":{"csp":"default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost"}},"bundle":{"active":true,"targets":["deb","rpm","appimage","nsis"],"icon":["icons/32x32.png","icons/128x128.png","icons/icon.ico"],"linux":{"deb":{"depends":["python3","python3-evdev","polkit"]},"rpm":{"depends":["python3","python3-evdev","polkit"]}}}}
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Mouse Modes",
+  "version": "0.1.0",
+  "identifier": "dev.mouse-modes.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Mouse Modes",
+        "width": 760,
+        "height": 810,
+        "minWidth": 393,
+        "minHeight": 300,
+        "backgroundColor": "#151719"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm", "appimage", "nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "linux": {
+      "deb": {
+        "depends": ["python3", "python3-evdev", "polkit"]
+      },
+      "rpm": {
+        "depends": ["python3", "python3-evdev", "polkit"]
+      }
+    }
+  }
+}
