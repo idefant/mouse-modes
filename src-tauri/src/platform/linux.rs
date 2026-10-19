@@ -6,9 +6,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-// Embedded at build time so installed apps don't depend on the source checkout.
-const HELPER: &str = include_str!("../../../linux/mouse_modes_helper.py");
-
 pub struct EngineHandle {
     input: Mutex<Option<ChildStdin>>,
     state: Arc<Mutex<EngineStatus>>,
@@ -23,11 +20,12 @@ struct HelperEvent {
 impl EngineHandle {
     pub fn start(callback: EventCallback, settings: Settings) -> Result<Self, String> {
         settings.validate()?;
-        // The helper itself is passed as a python -I -c argument, not loaded from
-        // a user-writable file with persistent root authorization. Polkit asks
-        // for this exact invocation; no permissive polkit rule is installed.
+        // A separate invocation of this Rust executable performs input access.
+        // Explicit pkexec authorization applies to this executable/argument only;
+        // the helper entrypoint exits before initializing Tauri or a webview.
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut command = Command::new("pkexec");
-        command.args(["/usr/bin/python3", "-I", "-u", "-c", HELPER]);
+        command.arg(executable).arg("--input-helper");
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
