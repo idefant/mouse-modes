@@ -1,0 +1,34 @@
+name: Build and check
+on: [push, pull_request]
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev python3-evdev
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - if: runner.os == 'Linux'
+        run: python3 linux/test_helper.py
+      - run: npm run tauri build -- --no-bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mouse-modes-${{ runner.os }}
+          path: |
+            src-tauri/target/release/mouse-modes
+            src-tauri/target/release/mouse-modes.exe
