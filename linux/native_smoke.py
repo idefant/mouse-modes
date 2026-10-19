@@ -1,8 +1,9 @@
 #!/usr/bin/python3
 """Opt-in root integration test with isolated synthetic input devices only.
 
-No real device is grabbed. Relay outputs are grabbed by the test before any
-synthetic key/motion is emitted, so test shortcuts do not reach the desktop.
+No real device is grabbed. Virtual mouse output is grabbed before motion is
+emitted. Outside recording, standalone synthetic F13-F17 and Ctrl key edges
+are visible to the desktop; run this fixture without concurrent keyboard use.
 """
 import json
 from pathlib import Path
@@ -59,7 +60,7 @@ def main():
                 outputs['mouse' if device.name.endswith('mouse') else 'keyboard'] = device
             else:
                 device.close()
-        check(len(outputs) == 2, 'real evdev discovery, exclusive grabs, and two uinput outputs')
+        check(len(outputs) == 2, 'real evdev discovery and two prepared uinput outputs')
         def drain(device, wait=.04):
             result = []
             while select.select([device.fd], [], [], wait)[0]:
@@ -86,7 +87,9 @@ def main():
             time.sleep(.06)
         settings()
         key(e.KEY_F13, 1)
-        check(motion(20, -20) == (20, -20, 0, 0), 'empty defaults preserve raw motion')
+        mouse.device.grab()
+        mouse.device.ungrab()
+        check(True, 'empty defaults leave physical mouse ungrabbed')
         bindings.update({name: {'keys': ['F' + str(index + 13)]} for index, name in enumerate(bindings)})
         settings()
         check(motion(20, -20) == (5, -5, 0, 0), 'settings apply to an already-held key without restart')
@@ -99,6 +102,21 @@ def main():
             key(code, 1)
             check(motion(40, 60) == expected, 'held scroll transform ' + str(code))
             key(code, 0)
+        # The mouse stays prearmed with configured bindings: a drag begun before
+        # a precision key must preserve one down/up pair while changing speed.
+        drain(outputs['mouse'])
+        mouse.write(e.EV_KEY, e.BTN_LEFT, 1)
+        mouse.syn()
+        time.sleep(.03)
+        check([item.value for item in drain(outputs['mouse']) if item.type == e.EV_KEY] == [1], 'drag button down forwarded once')
+        key(e.KEY_F13, 1)
+        check(motion(20, 0) == (5, 0, 0, 0), 'precision mode activates during an existing virtual drag')
+        key(e.KEY_F13, 0)
+        mouse.write(e.EV_KEY, e.BTN_LEFT, 0)
+        mouse.syn()
+        releases = [item.value for item in drain(outputs['mouse'])
+                    if item.type == e.EV_KEY and item.code == e.BTN_LEFT]
+        check(releases == [0], 'drag releases once after mode transitions')
         bindings['slow'] = {'keys': ['ControlLeft']}
         settings()
         key(e.KEY_RIGHTCTRL, 1)

@@ -63,6 +63,17 @@ class ModeTests(unittest.TestCase):
                          ['AltLeft', 'Control', 'KeyA'])
 
 
+class Source:
+    def __init__(self):
+        self.calls = []
+
+    def grab(self):
+        self.calls.append("grab")
+
+    def ungrab(self):
+        self.calls.append("ungrab")
+
+
 class Virtual:
     def __init__(self):
         self.events = []
@@ -83,7 +94,7 @@ class CaptureTests(unittest.TestCase):
         self.relay.e = types.SimpleNamespace(EV_SYN=0, EV_KEY=1, EV_REL=2, EV_MSC=4,
                                             SYN_DROPPED=3, SYN_REPORT=0)
         self.relay.names = {29: 'ControlLeft', 97: 'ControlRight', 30: 'KeyA', 1: 'Escape'}
-        self.device = {'keyboard': True, 'mouse': False, 'held': set(),
+        self.device = {'keyboard': True, 'mouse': False, 'held': set(), 'grabbed': False, 'source': Source(), 'motion': [0, 0],
                        'forwarded': set(), 'virtual': Virtual()}
         self.relay.devices = {'keyboard': self.device}
         self.relay.modes = helper.Modes()
@@ -91,6 +102,8 @@ class CaptureTests(unittest.TestCase):
         self.relay.capture_keys = set()
         self.relay.capture_blocked = False
         self.relay.capture_deadline = 0
+        self.relay.capture_requested = False
+        self.relay.last_status = None
         self.emitted = []
         self.patcher = patch.object(helper, 'emit', lambda event, value: self.emitted.append((event, value)))
         self.patcher.start()
@@ -107,7 +120,8 @@ class CaptureTests(unittest.TestCase):
         self.assertIn(('hotkey-captured', {'keys': ['Control', 'KeyA']}), self.emitted)
         self.key(30, 1)
         self.key(30, 0)
-        self.assertEqual(self.device['virtual'].events, [(1, 30, 1), (1, 30, 0)])
+        self.assertEqual(self.device['virtual'].events, [])
+        self.assertFalse(self.device['grabbed'])
 
     def test_cancel_drains_all_held_keys_without_replaying(self):
         self.relay.command({'command': 'capture'})
@@ -128,9 +142,65 @@ class CaptureTests(unittest.TestCase):
         self.key(30, 1)
         self.key(30, 0)
         self.assertIn(('hotkey-captured', {'keys': ['KeyA']}), self.emitted)
-        self.assertEqual(self.device['virtual'].events, [(1, 29, 1), (1, 29, 0)])
+        self.assertEqual(self.device['virtual'].events, [])
+
+    def test_keyboard_is_only_grabbed_for_acknowledged_capture(self):
+        self.key(30, 1)
+        self.assertFalse(self.device['grabbed'])
+        self.relay.command({'command': 'capture'})
+        self.assertFalse(self.relay.capturing)
+        self.assertFalse(self.device['grabbed'])
+        self.key(30, 0)
+        self.assertTrue(self.relay.capturing)
+        self.assertTrue(self.device['grabbed'])
+        self.key(29, 1)
+        self.key(29, 0)
+        self.assertFalse(self.device['grabbed'])
+        self.assertEqual(self.device['source'].calls, ['grab', 'ungrab'])
+
+    def test_combined_device_waits_for_existing_mouse_button_before_capture_ack(self):
+        self.device['mouse'] = True
+        self.device['held'].add(0x110)
+        self.relay.command({'command': 'capture'})
+        self.assertFalse(self.relay.capturing)
+        self.assertFalse(self.device['grabbed'])
+        self.key(0x110, 0)
+        self.assertTrue(self.relay.capturing)
+        self.assertTrue(self.device['grabbed'])
+
+    def test_configured_mouse_remains_grabbed_across_precision_drag(self):
+        self.device['keyboard'] = False
+        self.device['mouse'] = True
+        self.relay.recompute()
+        self.assertFalse(self.device['grabbed'])
+        self.relay.modes.bindings['slow'] = {'keys': ['ControlLeft']}
+        self.relay.recompute()
+        self.assertTrue(self.device['grabbed'])
+        self.key(0x110, 1)
+        self.relay.modes.update({'ControlLeft'})
+        self.relay.sync_grabs()
+        self.assertEqual(self.relay.modes.motion(20, 0), (5, 0, 0, 0))
+        self.relay.modes.update(set())
+        self.relay.sync_grabs()
+        self.key(0x110, 0)
+        self.assertEqual(self.device['source'].calls, ['grab'])
+        self.assertEqual([value for kind, code, value in self.device['virtual'].events
+                          if code == 0x110], [1, 0])
+        self.relay.modes.bindings['slow'] = None
+        self.relay.recompute()
+        self.assertFalse(self.device['grabbed'])
+        self.assertEqual(self.device['source'].calls, ['grab', 'ungrab'])
+
+    def test_advisory_readiness_does_not_remove_device_on_eagain(self):
+        def not_ready():
+            raise BlockingIOError(11, 'Resource temporarily unavailable')
+        self.device['source'].read = not_ready
+        self.relay.remove = lambda path: self.fail('EAGAIN removed an attached device')
+        self.relay.read_ready('keyboard')
+        self.assertIn('keyboard', self.relay.devices)
 
     def test_overflow_fails_closed(self):
+        self.device['grabbed'] = True
         with self.assertRaises(RuntimeError):
             self.relay.event(self.device, types.SimpleNamespace(type=0, code=3, value=0))
 

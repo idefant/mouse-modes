@@ -1,54 +1,77 @@
 # Linux input helper
 
-The app needs `polkit` (`pkexec`), `/usr/bin/python3`, Python's `evdev` package,
-Linux `uinput`, and a running graphical polkit authentication agent. On Arch /
-Omarchy, the Python package is `python-evdev`. These are runtime dependencies;
-Python is not embedded in the executable.
+Runtime dependencies: Linux uinput, polkit (`pkexec`), `/usr/bin/python3`,
+Python `evdev`, and a graphical polkit authentication agent. Arch/Omarchy names
+the Python package `python-evdev`. The GUI remains unprivileged; a separate
+helper uses explicit polkit authorization. No permissive polkit rule or input
+group membership is installed. The embedded helper runs Python isolated mode
+and communicates only over inherited JSON stdio pipes. Closing the pipe releases
+all grabs. It emits status/completed intentional chords, never typed-key streams.
 
-The GUI runs as the user. On launch it requests explicit polkit authorization
-for a separate Python helper. There is no installed permissive polkit rule,
-setuid executable, or input-group membership requirement. The helper is embedded
-in the Rust executable and passed directly to Python's isolated mode, rather
-than imported from a writable project directory.
+## Input ownership and latency
 
-The only IPC is inherited standard-input/output pipes. The helper accepts JSON
-settings, begin/cancel recording, and quit; it has no command execution or
-filesystem-path arguments. It emits engine status and a completed chord, never
-a stream of typed keys. Closing the app's pipe releases every grabbed device.
-An app crash also closes that pipe. A single `/run` lock prevents two instances
-of this helper from grabbing devices simultaneously.
+All input-device enumeration, capability probing, virtual-device creation and
+virtual-device destruction run in a discovery worker. UInput's node/udev lookup
+can wait up to 1.9 seconds; none of that work belongs in the input event loop.
+The worker caches known node identities, including excluded devices. Only the
+event loop changes grabs, selectors, held keys or mode state. Readiness yielding
+EAGAIN is retried without removing/recreating the device.
 
-Physical keyboards and relative mice are relayed through separate virtual input
-devices. Touchpads/tablets with absolute axes are excluded. Connected devices
-are discovered every two seconds. Mouse buttons, native wheel events, and
-high-resolution wheels are preserved. Fast mode wins over slow mode. Linux uses
-0.25× slow and 2× fast movement, retaining fractional deltas. Scrolling freezes
-both pointer axes, converts 20 raw units per wheel notch and caps a packet at
-20 notches per axis. Vertical scrolling follows the physical mouse Y direction.
+With five empty bindings, mice remain ungrabbed and their movement is handled
+by the normal desktop path. Virtual outputs are prepared in the background.
+With configured bindings, mice stay relayed even while no mode key is held.
+This preserves button ownership during dragging and lets precision/scroll modes
+start immediately while a button is already down. Hotkey presses never switch
+physical/virtual mouse ownership. Changing settings between empty/non-empty
+bindings waits for existing mouse buttons to be released before switching
+ownership, preventing lost releases. Absolute touchpads/tablets are excluded.
 
-Settings replace the mode bindings while the relay runs, including while keys
-are held. By default all five bindings are empty. Matches allow extra held keys,
-as in the source AHK wildcard hotkeys.
+Keyboards are observed without exclusive grabs outside recording. Capture waits
+for existing keys to be released, then exclusively grabs keyboards before its
+acknowledgement is sent to the UI. On mixed keyboard/mouse devices, existing
+mouse buttons must also be released before capture starts. Down/repeat/up events
+are suppressed throughout recording. Completion, cancel and the 20-second
+timeout release the grab only after recorded keys are physically released.
+Both modifier sides normalize to any-side; a single side remains distinct.
 
-During capture all keyboard events are suppressed, including repeats and
-releases. The backend acknowledges capture before the UI can ask for the chord.
-A chord is completed after every keyboard key has been released. Keys already
-held when capture starts are released virtually and excluded until physically
-released. Cancel/timeout drains remaining held keys without replay. Capture
-times out after 20 seconds. Both sides of one modifier normalize to an any-side
-modifier. Left and right remain distinct if only one is recorded.
+Fast wins over slow; Linux factors are .25×/2× with fractional movement retained.
+Scrolling freezes both pointer axes and converts 20 raw units into one notch,
+capped at 20 notches per axis per packet. Settings update while keys are held.
+Buttons/native/high-resolution wheels are preserved. Unexpected active-relay
+input overflow stops safely and releases devices; restart to reconnect.
 
-If another relay already owns a physical device (including the earlier test
-script), this helper reports an error and releases devices it has opened.
-Input queue overflow also stops the relay and releases its grabs rather than
-leaving an incorrect mode active. Restart after authorization rejection, device
-ownership errors, or an overflow.
+## Verification
 
-Pure tests, requiring neither root nor evdev:
+Pure tests (no root/evdev):
 
 ```sh
 python3 -m unittest discover -s linux -v
 ```
 
-Physical input behavior still needs an interactive test on the target machine;
-unit tests do not prove compositor acceptance of uinput devices or polkit UI.
+Opt-in native tests require root and use synthetic devices only. They never grab
+real user input. Mouse outputs are grabbed to prevent cursor movement. Standalone
+synthetic F13-F17/Ctrl edges outside recording remain visible to the desktop:
+run unattended, without concurrent keyboard use.
+
+```sh
+python3 linux/native_smoke.py
+python3 linux/native_latency.py
+python3 linux/native_latency.py --mode fast --discovery-delay 1.9
+```
+
+`native_latency.py` sends 4,500 packets per mode at 1 kHz with configured
+bindings, adds/removes another device while streaming, and injects a deterministic
+120 ms discovery wait by default. It measures kernel output timestamp minus
+injection timestamp, avoiding observer scheduling artifacts. Counts, p95, p99
+and max are printed; missing packets/helper exit or excessive lag fail the run.
+`--discovery-delay 0 --no-hotplug` gives the ordinary steady-state control.
+An old helper may be passed as a positional path with `--baseline` to reproduce
+the defect without expecting the run to pass.
+
+The old event loop blocks for ~122 ms during the deterministic discovery wait,
+then hits SYN_DROPPED and stops before all 4,500 packets arrive. Its clean steady
+control passes; the tests establish a blocking-discovery defect, not a direct
+profile of the user's physical-device stutter. The corrected worker survives
+slow discovery while existing configured modes keep forwarding. Physical input
+and compositor acceptance still need user testing; these tests do not establish
+an absolute latency bound for arbitrary CPU load, polling rates or devices.

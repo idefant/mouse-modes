@@ -12,6 +12,8 @@ import selectors
 import signal
 import sys
 import time
+import queue
+import threading
 
 ACTIONS = ('slow', 'fast', 'scrollHorizontal', 'scrollVertical', 'scrollBoth')
 MODIFIERS = ('Control', 'Shift', 'Alt', 'Meta')
@@ -111,6 +113,11 @@ class Relay:
         self.capture_blocked = False
         self.capture_deadline = 0
         self.drain = False
+        self.capture_requested = False
+        self.discovered = queue.SimpleQueue()
+        self.retired = queue.SimpleQueue()
+        self.discovery_stop = threading.Event()
+        self.last_status = None
 
     def held(self):
         return {self.names[code] for device in self.devices.values() for code in device['held'] if code in self.names}
@@ -124,17 +131,45 @@ class Relay:
 
     def recompute(self):
         self.modes.update(self.held(), self.capturing or self.drain)
+        self.sync_grabs()
+
+    def sync_grabs(self):
+        active = any(self.modes.bindings.values())
+        for device in self.devices.values():
+            wanted = ((device['mouse'] and active) or
+                      (device['keyboard'] and (self.capturing or self.drain)))
+            if wanted == device['grabbed']:
+                continue
+            # Grabs change only when bindings become empty/non-empty or while
+            # recording. Never transfer button ownership mid-drag on those
+            # settings transitions. Hotkey presses never switch mouse ownership.
+            buttons = {code for code in device['held'] if 0x110 <= code < 0x120}
+            if device['mouse'] and buttons:
+                continue
+            if wanted:
+                device['source'].grab()
+                device['grabbed'] = True
+                device['motion'] = [0, 0]
+            else:
+                self.release(device)
+                device['source'].ungrab()
+                device['grabbed'] = False
+                device['motion'] = [0, 0]
 
     def status(self):
         mice = sum(device['mouse'] for device in self.devices.values())
         keyboards = sum(device['keyboard'] for device in self.devices.values())
-        emit('engine-status', {'available': bool(mice and keyboards), 'capturing': self.capturing,
-                              'message': f'Linux: мышей — {mice}, клавиатур — {keyboards}'})
+        payload = {'available': bool(mice and keyboards), 'capturing': self.capturing,
+                   'message': f'Linux: мышей — {mice}, клавиатур — {keyboards}'}
+        if payload != self.last_status:
+            self.last_status = payload
+            emit('engine-status', payload)
 
     def release(self, device):
         for code in device['forwarded']:
             device['virtual'].write(self.e.EV_KEY, code, 0)
-        device['virtual'].syn()
+        if device['forwarded']:
+            device['virtual'].syn()
         device['forwarded'].clear()
 
     def remove(self, path):
@@ -143,59 +178,103 @@ class Relay:
             self.release(device)
         finally:
             self.selector.unregister(device['source'])
-            device['source'].close()  # closes EVIOCGRAB even if ungrab fails
-            device['virtual'].close()
+            device['source'].close()
+            self.retired.put(device['virtual'])
         self.recompute()
 
-    def scan(self):
+    def discover(self):
+        """All slow node probing/uinput discovery runs away from input processing.
+
+        The worker owns prepared handles until the event-loop queue accepts them;
+        only the event thread ever grabs devices or edits selector/device state.
+        """
         from evdev import InputDevice, UInput, list_devices
-        paths = set(list_devices())
-        for path in list(self.devices):
-            if path not in paths:
-                self.remove(path)
-        for path in paths - self.devices.keys():
-            source = InputDevice(path)
-            virtual = None
-            try:
-                caps = source.capabilities()
-                keys = set(caps.get(self.e.EV_KEY, []))
-                mouse = {self.e.REL_X, self.e.REL_Y} <= set(caps.get(self.e.EV_REL, [])) and self.e.EV_ABS not in caps
-                keyboard = bool(keys & self.names.keys())
-                if source.name.startswith(('mouse-modes:', 'mouse-modes-test')) or not (mouse or keyboard):
-                    source.close()
+        known = {}
+        try:
+            while not self.discovery_stop.is_set():
+                while not self.retired.empty():
+                    self.retired.get_nowait().close()
+                paths = set(list_devices())
+                identities = {}
+                prepared = []
+                for path in paths:
+                    source = virtual = None
+                    try:
+                        stat = os.stat(path)
+                        identity = (stat.st_ino, stat.st_rdev)
+                        identities[path] = identity
+                        if known.get(path) == identity:
+                            continue
+                        source = InputDevice(path)
+                        virtual = None
+                        caps = source.capabilities()
+                        keys = set(caps.get(self.e.EV_KEY, []))
+                        mouse = ({self.e.REL_X, self.e.REL_Y} <= set(caps.get(self.e.EV_REL, []))
+                                 and self.e.EV_ABS not in caps)
+                        keyboard = bool(keys & self.names.keys())
+                        if (source.name.startswith(('mouse-modes:', 'mouse-modes-test')) or
+                                not (mouse or keyboard) or self.e.EV_ABS in caps):
+                            source.close()
+                            continue
+                        relay_caps = {kind: codes for kind, codes in caps.items()
+                                      if kind in (self.e.EV_KEY, self.e.EV_REL, self.e.EV_MSC)}
+                        if mouse:
+                            relay_caps[self.e.EV_REL] = sorted(set(relay_caps[self.e.EV_REL]) | {
+                                self.e.REL_WHEEL, self.e.REL_HWHEEL,
+                                self.e.REL_WHEEL_HI_RES, self.e.REL_HWHEEL_HI_RES})
+                        virtual = UInput(relay_caps, name='mouse-modes: ' + source.name,
+                                         vendor=source.info.vendor, product=source.info.product,
+                                         version=source.info.version, bustype=source.info.bustype,
+                                         input_props=source.input_props())
+                        prepared.append((path, identity, {
+                            'source': source, 'virtual': virtual, 'mouse': mouse,
+                            'keyboard': keyboard, 'held': set(), 'forwarded': set(),
+                            'motion': [0, 0], 'grabbed': False}))
+                    except (OSError, SystemError):
+                        # evdev ioctl wrappers can also raise SystemError when a
+                        # source disappears during its input_props() query.
+                        # Unplug/open races must not stop existing motion relays.
+                        if source is not None:
+                            source.close()
+                        if virtual is not None:
+                            virtual.close()
+                        identities.pop(path, None)  # retry if it still exists
+                known = identities
+                self.discovered.put((identities, prepared))
+                self.discovery_stop.wait(.5)
+        except Exception as error:
+            self.discovered.put(error)
+
+    def install_discovery(self):
+        while not self.discovered.empty():
+            batch = self.discovered.get_nowait()
+            if isinstance(batch, Exception):
+                raise batch
+            identities, prepared = batch
+            for path in list(self.devices):
+                if identities.get(path) != self.devices[path]['identity']:
+                    self.remove(path)
+            for path, identity, device in prepared:
+                if path in self.devices:
+                    device['source'].close()
+                    self.retired.put(device['virtual'])
                     continue
-                # Combined absolute touchpad/tablet devices are never grabbed.
-                if self.e.EV_ABS in caps:
-                    source.close()
+                device['identity'] = identity
+                # Discard pre-observation history: it already reached the desktop.
+                try:
+                    for _ in range(16):
+                        list(device['source'].read())
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    device['source'].close()
+                    self.retired.put(device['virtual'])
                     continue
-                relay_caps = {kind: codes for kind, codes in caps.items()
-                              if kind in (self.e.EV_KEY, self.e.EV_REL, self.e.EV_MSC)}
-                if mouse:
-                    relay_caps[self.e.EV_REL] = sorted(set(relay_caps[self.e.EV_REL]) | {
-                        self.e.REL_WHEEL, self.e.REL_HWHEEL,
-                        self.e.REL_WHEEL_HI_RES, self.e.REL_HWHEEL_HI_RES})
-                virtual = UInput(relay_caps, name='mouse-modes: ' + source.name,
-                                 vendor=source.info.vendor, product=source.info.product,
-                                 version=source.info.version, bustype=source.info.bustype,
-                                 input_props=source.input_props())
-                source.grab()
-                held = set(source.active_keys())
-                device = {'source': source, 'virtual': virtual, 'mouse': mouse,
-                          'keyboard': keyboard, 'held': held, 'forwarded': set(), 'motion': [0, 0]}
+                device['held'] = set(device['source'].active_keys())
                 self.devices[path] = device
-                self.selector.register(source, selectors.EVENT_READ, path)
-                if not (self.capturing or self.drain):
-                    for code in held:
-                        virtual.write(self.e.EV_KEY, code, 1)
-                        device['forwarded'].add(code)
-                    virtual.syn()
-                self.recompute()
-            except Exception:
-                source.close()
-                if virtual:
-                    virtual.close()
-                raise
-        self.status()
+                self.selector.register(device['source'], selectors.EVENT_READ, path)
+            self.recompute()
+            self.status()
 
     def command(self, value):
         command = value.get('command')
@@ -215,6 +294,26 @@ class Relay:
             if self.capturing or self.drain:
                 self.status()
                 return
+            self.capture_requested = True
+            self.start_capture_if_ready()
+        elif command == 'cancel':
+            self.capture_requested = False
+            self.capturing = False
+            self.drain = self.keys_down() and any(d['grabbed'] and d['keyboard'] for d in self.devices.values())
+            self.capture_keys.clear()
+            self.recompute()
+            self.status()
+        elif command == 'quit':
+            raise EOFError
+        else:
+            raise ValueError('Unknown command')
+
+    def start_capture_if_ready(self):
+        mixed_buttons = any(device['keyboard'] and device['mouse'] and not device['grabbed'] and
+                            any(0x110 <= code < 0x120 for code in device['held'])
+                            for device in self.devices.values())
+        if self.capture_requested and not self.keys_down() and not mixed_buttons:
+            self.capture_requested = False
             self.capturing = True
             self.capture_keys.clear()
             self.capture_blocked = self.keys_down()
@@ -224,21 +323,15 @@ class Relay:
                     self.release(device)
             self.recompute()
             self.status()
-        elif command == 'cancel':
-            self.capturing = False
-            self.drain = self.keys_down()
-            self.capture_keys.clear()
-            self.recompute()
-            self.status()
-        elif command == 'quit':
-            raise EOFError
-        else:
-            raise ValueError('Unknown command')
 
     def event(self, device, event):
         e = self.e
         virtual = device['virtual']
         if event.type == e.EV_SYN and event.code == e.SYN_DROPPED:
+            if not device['grabbed']:
+                device['held'] = set(device['source'].active_keys())
+                self.recompute()
+                return
             raise RuntimeError('Переполнение очереди ввода. Служба безопасно остановлена; перезапустите программу.')
         if event.type == e.EV_KEY:
             if event.value == 0:
@@ -262,7 +355,11 @@ class Relay:
                     self.drain = False
                 self.recompute()
                 return
-            self.recompute()
+            self.modes.update(self.held(), self.capturing or self.drain)
+            if not device['grabbed']:
+                self.start_capture_if_ready()
+                self.sync_grabs()
+                return
             if event.value == 0:
                 # Do not send unmatched releases for keys suppressed during capture.
                 if event.code not in device['forwarded']:
@@ -273,6 +370,11 @@ class Relay:
             elif event.value == 2 and event.code not in device['forwarded']:
                 return
             virtual.write_event(event)
+            if event.value == 0:
+                virtual.syn()
+            self.sync_grabs()
+        elif not device['grabbed']:
+            return
         elif device['keyboard'] and (self.capturing or self.drain) and event.type == e.EV_MSC:
             return
         elif device['mouse'] and event.type == e.EV_REL and event.code in (e.REL_X, e.REL_Y):
@@ -290,19 +392,28 @@ class Relay:
         elif event.type in (e.EV_REL, e.EV_MSC):
             virtual.write_event(event)
 
+    def read_ready(self, path):
+        device = self.devices[path]
+        try:
+            for event in device['source'].read():
+                self.event(device, event)
+        except BlockingIOError:
+            pass  # readiness is advisory, not a disconnected device
+        except OSError:
+            self.remove(path)
+
     def run(self):
         self.selector.register(sys.stdin.buffer, selectors.EVENT_READ, None)
         buffer = b''
-        next_scan = 0
+        worker = threading.Thread(target=self.discover, daemon=True)
+        worker.start()
         try:
             while True:
                 now = time.monotonic()
-                if now >= next_scan:
-                    self.scan()
-                    next_scan = now + 2
+                self.install_discovery()
                 if self.capturing and now >= self.capture_deadline:
                     self.command({'command': 'cancel'})
-                ready = self.selector.select(.2)
+                ready = self.selector.select(.01)
                 ready.sort(key=lambda item: item[0].data is not None and self.devices[item[0].data]['mouse'])
                 for selected, _ in ready:
                     if selected.data is None:
@@ -316,17 +427,22 @@ class Relay:
                             line, buffer = buffer.split(b'\n', 1)
                             self.command(json.loads(line))
                     else:
-                        device = self.devices[selected.data]
-                        try:
-                            for event in device['source'].read():
-                                self.event(device, event)
-                        except OSError:
-                            self.remove(selected.data)
+                        self.read_ready(selected.data)
         except EOFError:
             pass
         finally:
+            self.discovery_stop.set()
+            worker.join(timeout=3)
+            while not self.discovered.empty():
+                batch = self.discovered.get_nowait()
+                if not isinstance(batch, Exception):
+                    for _, _, device in batch[1]:
+                        device["source"].close()
+                        device["virtual"].close()
             for path in list(self.devices):
                 self.remove(path)
+            while not self.retired.empty():
+                self.retired.get_nowait().close()
             self.selector.close()
 
 
