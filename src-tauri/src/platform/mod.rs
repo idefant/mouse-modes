@@ -8,3 +8,8 @@ mod windows;
 pub use windows::EngineHandle;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 compile_error!("Mouse Modes supports Linux and Windows");
+
+#[cfg(target_os = "linux")]
+mod linux_native;
+#[cfg(target_os = "linux")]
+pub use linux_native::run_helper;

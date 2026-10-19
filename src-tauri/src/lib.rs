@@ -196,3 +196,9 @@ pub fn run() {
             }
         });
 }
+
+/// The privileged Linux input worker enters here before any GUI initialization.
+#[cfg(target_os = "linux")]
+pub fn run_input_helper() -> Result<(), String> {
+    platform::run_helper()
+}
