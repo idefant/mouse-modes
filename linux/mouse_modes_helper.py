@@ -96,6 +96,24 @@ def code_map(e):
     return {getattr(e, 'KEY_' + name): dom for name, dom in names.items() if hasattr(e, 'KEY_' + name)}
 
 
+def classify_device(caps, names, e):
+    """A keyboard's ABS_VOLUME is not an absolute pointing device.
+
+    Some ZMK composite HID keyboards advertise a volume absolute axis alongside
+    ordinary keys/wheels. Reject only actual absolute/touch pointer capabilities,
+    while allowing non-pointer axes to retain normal consumer-control behavior.
+    """
+    keys = set(caps.get(e.EV_KEY, []))
+    absolute = {axis[0] for axis in caps.get(e.EV_ABS, [])}
+    pointer_axes = {e.ABS_X, e.ABS_Y, e.ABS_MT_POSITION_X, e.ABS_MT_POSITION_Y}
+    touch_buttons = {e.BTN_TOUCH, e.BTN_TOOL_FINGER, e.BTN_TOOL_PEN}
+    if absolute & pointer_axes or keys & touch_buttons:
+        return False, False
+    mouse = {e.REL_X, e.REL_Y} <= set(caps.get(e.EV_REL, []))
+    keyboard = bool(keys & names.keys())
+    return mouse, keyboard
+
+
 def emit(event, payload):
     print(json.dumps({'event': event, 'payload': payload}), flush=True)
 
@@ -208,16 +226,13 @@ class Relay:
                         source = InputDevice(path)
                         virtual = None
                         caps = source.capabilities()
-                        keys = set(caps.get(self.e.EV_KEY, []))
-                        mouse = ({self.e.REL_X, self.e.REL_Y} <= set(caps.get(self.e.EV_REL, []))
-                                 and self.e.EV_ABS not in caps)
-                        keyboard = bool(keys & self.names.keys())
+                        mouse, keyboard = classify_device(caps, self.names, self.e)
                         if (source.name.startswith(('mouse-modes:', 'mouse-modes-test')) or
-                                not (mouse or keyboard) or self.e.EV_ABS in caps):
+                                not (mouse or keyboard)):
                             source.close()
                             continue
                         relay_caps = {kind: codes for kind, codes in caps.items()
-                                      if kind in (self.e.EV_KEY, self.e.EV_REL, self.e.EV_MSC)}
+                                      if kind in (self.e.EV_KEY, self.e.EV_REL, self.e.EV_MSC, self.e.EV_ABS)}
                         if mouse:
                             relay_caps[self.e.EV_REL] = sorted(set(relay_caps[self.e.EV_REL]) | {
                                 self.e.REL_WHEEL, self.e.REL_HWHEEL,
@@ -389,7 +404,7 @@ class Relay:
                     if amount:
                         virtual.write(e.EV_REL, code, amount)
             virtual.syn()
-        elif event.type in (e.EV_REL, e.EV_MSC):
+        elif event.type in (e.EV_REL, e.EV_MSC, e.EV_ABS):
             virtual.write_event(event)
 
     def read_ready(self, path):

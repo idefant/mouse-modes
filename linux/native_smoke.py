@@ -6,6 +6,7 @@ emitted. Outside recording, standalone synthetic F13-F17 and Ctrl key edges
 are visible to the desktop; run this fixture without concurrent keyboard use.
 """
 import json
+import argparse
 from pathlib import Path
 import queue
 import select
@@ -26,8 +27,21 @@ def main():
     with ExitStack() as stack:
         mouse = stack.enter_context(UInput({e.EV_KEY: [e.BTN_LEFT], e.EV_REL: [e.REL_X, e.REL_Y]},
                                            name='mm-native-test-mouse'))
-        keyboard = stack.enter_context(UInput({e.EV_KEY: [e.KEY_F13, e.KEY_F14, e.KEY_F15,
-            e.KEY_F16, e.KEY_F17, e.KEY_LEFTCTRL, e.KEY_RIGHTCTRL, e.KEY_A]}, name='mm-native-test-keyboard'))
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument('--clone-keyboard', help='Copy only device capabilities, never physical events')
+        args = parser.parse_args()
+        keyboard_caps = {e.EV_KEY: [e.KEY_F13, e.KEY_F14, e.KEY_F15,
+            e.KEY_F16, e.KEY_F17, e.KEY_LEFTCTRL, e.KEY_RIGHTCTRL, e.KEY_A],
+            e.EV_REL: [e.REL_HWHEEL, e.REL_HWHEEL_HI_RES],
+            e.EV_ABS: [(e.ABS_VOLUME, (0, 0, 1023, 0, 0, 0))]}
+        if args.clone_keyboard:
+            source = InputDevice(args.clone_keyboard)
+            try:
+                keyboard_caps = {kind: codes for kind, codes in source.capabilities().items()
+                                 if kind in (e.EV_KEY, e.EV_REL, e.EV_MSC, e.EV_ABS)}
+            finally:
+                source.close()
+        keyboard = stack.enter_context(UInput(keyboard_caps, name='mm-native-test-keyboard'))
         code = Path(__file__).with_name('mouse_modes_helper.py').read_text()
         # Change discovery only. All event processing/IPC/grab code is production code.
         code = code.replace('paths = set(list_devices())',
@@ -61,6 +75,8 @@ def main():
             else:
                 device.close()
         check(len(outputs) == 2, 'real evdev discovery and two prepared uinput outputs')
+        check(e.ABS_VOLUME in {axis for axis, _ in outputs['keyboard'].capabilities().get(e.EV_ABS, [])},
+              'Cornechon keyboard ABS_VOLUME capability preserved')
         def drain(device, wait=.04):
             result = []
             while select.select([device.fd], [], [], wait)[0]:
@@ -131,6 +147,19 @@ def main():
             key(code, 1)
             check(motion(20, 0) == (5, 0, 0, 0), 'any-side modifier ' + str(code))
             key(code, 0)
+        for number in range(13, 17):
+            drain(outputs['keyboard'])
+            drain(keyboard.device)
+            command('capture')
+            event('engine-status', lambda status: status['capturing'])
+            key(getattr(e, 'KEY_F' + str(number)), 1)
+            key(getattr(e, 'KEY_F' + str(number)), 0)
+            check(event('hotkey-captured') == {'keys': ['F' + str(number)]},
+                  'Cornechon keyboard records F' + str(number))
+            event('engine-status', lambda status: not status['capturing'])
+            check(not [item for item in drain(keyboard.device) if item.type == e.EV_KEY] and
+                  not [item for item in drain(outputs['keyboard']) if item.type == e.EV_KEY],
+                  'recording F' + str(number) + ' reaches neither physical observers nor virtual output')
         drain(outputs['keyboard'])
         command('capture')
         event('engine-status', lambda status: status['capturing'])

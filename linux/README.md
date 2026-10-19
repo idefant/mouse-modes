@@ -24,7 +24,11 @@ This preserves button ownership during dragging and lets precision/scroll modes
 start immediately while a button is already down. Hotkey presses never switch
 physical/virtual mouse ownership. Changing settings between empty/non-empty
 bindings waits for existing mouse buttons to be released before switching
-ownership, preventing lost releases. Absolute touchpads/tablets are excluded.
+ownership, preventing lost releases. Absolute touchpads/tablets are excluded. Device selection checks actual pointer
+axes/touch buttons rather than rejecting all EV_ABS capabilities: ZMK Cornechon
+keyboards expose ABS_VOLUME alongside ordinary keys and are accepted. Non-pointer
+absolute consumer axes remain present on virtual devices and are forwarded when
+a mixed device is relayed.
 
 Keyboards are observed without exclusive grabs outside recording. Capture waits
 for existing keys to be released, then exclusively grabs keyboards before its
@@ -55,6 +59,9 @@ run unattended, without concurrent keyboard use.
 
 ```sh
 python3 linux/native_smoke.py
+# Optional: copy only a real keyboard's capabilities into the synthetic fixture.
+# This never reads or relays the real device's key events.
+python3 linux/native_smoke.py --clone-keyboard /dev/input/event5
 python3 linux/native_latency.py
 python3 linux/native_latency.py --mode fast --discovery-delay 1.9
 ```

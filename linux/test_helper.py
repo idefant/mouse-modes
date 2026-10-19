@@ -92,7 +92,7 @@ class CaptureTests(unittest.TestCase):
     def setUp(self):
         self.relay = helper.Relay.__new__(helper.Relay)
         self.relay.e = types.SimpleNamespace(EV_SYN=0, EV_KEY=1, EV_REL=2, EV_MSC=4,
-                                            SYN_DROPPED=3, SYN_REPORT=0)
+                                            SYN_DROPPED=3, SYN_REPORT=0, EV_ABS=3)
         self.relay.names = {29: 'ControlLeft', 97: 'ControlRight', 30: 'KeyA', 1: 'Escape'}
         self.device = {'keyboard': True, 'mouse': False, 'held': set(), 'grabbed': False, 'source': Source(), 'motion': [0, 0],
                        'forwarded': set(), 'virtual': Virtual()}
@@ -199,11 +199,37 @@ class CaptureTests(unittest.TestCase):
         self.relay.read_ready('keyboard')
         self.assertIn('keyboard', self.relay.devices)
 
+    def test_non_pointer_absolute_consumer_axis_is_forwarded_when_relaying(self):
+        self.device['grabbed'] = True
+        self.relay.event(self.device, types.SimpleNamespace(type=3, code=32, value=500))
+        self.assertEqual(self.device['virtual'].events, [(3, 32, 500)])
+
     def test_overflow_fails_closed(self):
         self.device['grabbed'] = True
         with self.assertRaises(RuntimeError):
             self.relay.event(self.device, types.SimpleNamespace(type=0, code=3, value=0))
 
+
+
+class DeviceClassificationTests(unittest.TestCase):
+    def setUp(self):
+        self.e = types.SimpleNamespace(EV_KEY=1, EV_REL=2, EV_ABS=3,
+            ABS_X=0, ABS_Y=1, ABS_MT_POSITION_X=53, ABS_MT_POSITION_Y=54,
+            BTN_TOUCH=330, BTN_TOOL_FINGER=325, BTN_TOOL_PEN=320, REL_X=0, REL_Y=1)
+        self.names = {30: 'KeyA', 183: 'F13'}
+
+    def test_cornechon_keyboard_volume_axis_is_accepted(self):
+        caps = {1: [30, 183], 2: [6, 12], 3: [(32, None)]}
+        self.assertEqual(helper.classify_device(caps, self.names, self.e), (False, True))
+
+    def test_tablet_touchpad_remain_excluded_even_if_they_advertise_keys(self):
+        for caps in ({1:[30], 3:[(0,None),(1,None)]},
+                     {1:[30,330], 3:[(53,None),(54,None)]}):
+            self.assertEqual(helper.classify_device(caps, self.names, self.e), (False, False))
+
+    def test_relative_combo_with_consumer_volume_axis_is_accepted(self):
+        caps = {1:[30,183,272], 2:[0,1], 3:[(32,None)]}
+        self.assertEqual(helper.classify_device(caps, self.names, self.e), (True, True))
 
 if __name__ == '__main__':
     unittest.main()
