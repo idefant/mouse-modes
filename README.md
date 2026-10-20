@@ -12,6 +12,10 @@
 
 Закрытие окна оставляет программу в трее. Нажмите значок, чтобы открыть меню «Настройки / Выход». Переключатель автозапуска включает запуск при входе в систему со скрытым окном.
 
+## Установка
+
+Скачайте установщик из [последнего стабильного релиза](https://github.com/idefant/mouse-modes/releases/latest): `.exe` для Windows, `.deb` для Debian/Ubuntu или `.rpm` для Fedora и других RPM-дистрибутивов. Предварительные версии доступны в [списке релизов](https://github.com/idefant/mouse-modes/releases). Для каждого выпуска публикуется файл `SHA256SUMS`. История изменений — в [CHANGELOG.md](CHANGELOG.md).
+
 ## Запуск
 
 Запустите `mouse-modes` на Linux или `mouse-modes.exe` на Windows. Сборка из исходников описана в [CONTRIBUTING.md](CONTRIBUTING.md).

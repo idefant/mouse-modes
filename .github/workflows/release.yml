@@ -62,7 +62,9 @@ jobs:
           set -euo pipefail
           node scripts/extract-changelog.mjs "$RELEASE_VERSION" > release-notes.md
           mapfile -d '' files < <(find installers -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.rpm' \) -print0)
-          test "${#files[@]}" -eq 3
+          expected=3
+          if [[ "$RELEASE_VERSION" == *-* ]]; then expected=2; fi
+          test "${#files[@]}" -eq "$expected"
           sha256sum "${files[@]}" | sed 's|  installers/.*/|  |' > installers/SHA256SUMS
           flags=(--latest)
           if [[ "$RELEASE_VERSION" == *-* ]]; then

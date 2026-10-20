@@ -32,6 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev rpm
       - name: Sync version from release tag
@@ -50,7 +51,16 @@ jobs:
         run: npm run tauri build -- --no-bundle
       - name: Build installers
         if: inputs.version != ''
-        run: npm run tauri build -- --bundles ${{ matrix.bundles }}
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          BUNDLES: ${{ matrix.bundles }}
+        shell: bash
+        run: |
+          # Tauri's RPM packager rejects hyphens in prerelease versions.
+          if [[ "$RUNNER_OS" == Linux && "$RELEASE_VERSION" == *-* ]]; then
+            BUNDLES=deb
+          fi
+          npm run tauri build -- --bundles "$BUNDLES"
       - uses: actions/upload-artifact@v4
         if: inputs.version == ''
         with:
