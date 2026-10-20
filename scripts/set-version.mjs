@@ -17,7 +17,7 @@ for (const [file, section] of [
   ['src-tauri/Cargo.toml', /(^\[package\][\s\S]*?^version = ")[^"]+("$)/m],
   ['src-tauri/Cargo.lock', /(^\[\[package\]\]\nname = "mouse-modes"\nversion = ")[^"]+("$)/m],
 ]) {
-  const content = fs.readFileSync(root + file, 'utf8');
+  const content = fs.readFileSync(root + file, 'utf8').replaceAll('\r\n', '\n');
   if (!section.test(content)) throw new Error(`Package version missing in ${file}`);
   fs.writeFileSync(root + file, content.replace(section, `$1${version}$2`));
 }
