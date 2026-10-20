@@ -1033,3 +1033,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "linux_native_tests.rs"]
+mod native_tests;
