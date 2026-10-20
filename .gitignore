@@ -4,7 +4,5 @@ src-tauri/target/
 *.log
 .DS_Store
 
-__pycache__/
-*.pyc
 *.tsbuildinfo
 src-tauri/gen/
