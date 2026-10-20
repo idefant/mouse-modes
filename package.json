@@ -1,15 +1,16 @@
 {
   "name": "mouse-modes",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.0-alpha-1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "check": "tsc -b && eslint . && stylelint 'src/**/*.scss'",
+    "check": "tsc -b && eslint . && stylelint \"src/**/*.scss\"",
     "tauri": "tauri",
     "test": "vitest run",
-    "format": "prettier --write src *.json *.ts *.js .github/workflows/*.yml"
+    "format": "prettier --write src *.json *.ts *.js .github/workflows/*.yml",
+    "test:release": "node --test scripts/*.tests.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
