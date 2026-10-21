@@ -145,9 +145,18 @@ pub fn run() {
                     let _ = handle.emit("hotkey-captured", hotkey);
                 }
                 EngineEvent::Status(status) => {
+                    if !status.available {
+                        // Failed background startup must be visible to the user.
+                        show(&handle);
+                    }
                     let _ = handle.emit("engine-status", status);
                 }
             });
+            if std::env::args().any(|arg| arg == "--autostart") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
             let engine = platform::EngineHandle::start(callback, settings.clone())?;
             app.manage(AppState {
                 settings: Mutex::new(settings),
@@ -170,11 +179,6 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
-            if std::env::args().any(|arg| arg == "--autostart") {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                }
-            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -201,4 +205,9 @@ pub fn run() {
 #[cfg(target_os = "linux")]
 pub fn run_input_helper() -> Result<(), String> {
     platform::run_helper()
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_input_service() -> Result<(), String> {
+    platform::run_service()
 }

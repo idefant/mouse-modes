@@ -1,0 +1,29 @@
+[Unit]
+Description=Mouse Modes input worker
+
+[Service]
+User=mouse-modes
+Group=mouse-modes
+SupplementaryGroups=input
+ExecStart=/usr/bin/mouse-modes --input-service
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeDirectory=mouse-modes-input
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+DevicePolicy=closed
+DeviceAllow=char-input rw
+DeviceAllow=/dev/uinput rw

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Mouse Modes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "dev.mouse-modes.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -40,14 +40,41 @@
     "linux": {
       "deb": {
         "depends": [
-          "pkexec",
-          "polkitd"
-        ]
+          "systemd",
+          "acl",
+          "kmod",
+          "libsystemd0",
+          "udev"
+        ],
+        "files": {
+          "/usr/lib/systemd/system/mouse-modes-input.socket": "linux/mouse-modes-input.socket",
+          "/usr/lib/systemd/system/mouse-modes-input@.service": "linux/mouse-modes-input@.service",
+          "/usr/lib/sysusers.d/mouse-modes.conf": "linux/sysusers.conf",
+          "/usr/lib/modules-load.d/mouse-modes.conf": "linux/modules-load.conf",
+          "/usr/lib/udev/rules.d/70-mouse-modes.rules": "linux/70-mouse-modes.rules"
+        },
+        "postInstallScript": "linux/post-install.sh",
+        "preRemoveScript": "linux/pre-remove.sh",
+        "postRemoveScript": "linux/post-remove.sh"
       },
       "rpm": {
         "depends": [
-          "polkit"
-        ]
+          "systemd",
+          "acl",
+          "kmod",
+          "systemd-libs",
+          "systemd-udev"
+        ],
+        "files": {
+          "/usr/lib/systemd/system/mouse-modes-input.socket": "linux/mouse-modes-input.socket",
+          "/usr/lib/systemd/system/mouse-modes-input@.service": "linux/mouse-modes-input@.service",
+          "/usr/lib/sysusers.d/mouse-modes.conf": "linux/sysusers.conf",
+          "/usr/lib/modules-load.d/mouse-modes.conf": "linux/modules-load.conf",
+          "/usr/lib/udev/rules.d/70-mouse-modes.rules": "linux/70-mouse-modes.rules"
+        },
+        "postInstallScript": "linux/post-install.sh",
+        "preRemoveScript": "linux/pre-remove.sh",
+        "postRemoveScript": "linux/post-remove.sh"
       }
     }
   }

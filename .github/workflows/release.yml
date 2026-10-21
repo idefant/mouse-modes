@@ -65,8 +65,8 @@ jobs:
           while IFS= read -r -d '' file; do
             mv "$file" "${file// /.}"
           done < <(find installers -type f -name '* *' -print0)
-          mapfile -d '' files < <(find installers -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.rpm' \) -print0)
-          expected=3
+          mapfile -d '' files < <(find installers -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.pkg.tar.zst' \) -print0)
+          expected=4
           if [[ "$RELEASE_VERSION" == *-* ]]; then expected=2; fi
           test "${#files[@]}" -eq "$expected"
           sha256sum "${files[@]}" | sed 's|  installers/.*/|  |' > installers/SHA256SUMS

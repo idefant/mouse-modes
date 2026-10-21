@@ -867,20 +867,7 @@ pub fn run_helper() -> Result<(), String> {
                 "Input helper requires explicit system authorization",
             ));
         }
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open("/run/mouse-modes-app.lock")?;
-        // SAFETY: flock operates only on our own lock descriptor.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
-            return Err(io::Error::other(
-                "Another Mouse Modes input helper is running",
-            ));
-        }
+        let _lock = relay_lock("/run/mouse-modes-app.lock")?;
         run_loop(0, DiscoveryConfig::default(), &mut emit)
     })();
     if let Err(error) = &result {
@@ -889,6 +876,41 @@ pub fn run_helper() -> Result<(), String> {
         );
     }
     result.map_err(|error| error.to_string())
+}
+
+fn relay_lock(path: &str) -> io::Result<std::fs::File> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        // A previous GUI connection may still be releasing its devices.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(lock);
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(
+                "Another Mouse Modes input worker is running",
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+pub(super) fn run_service_relay() -> io::Result<()> {
+    let _lock = relay_lock("/run/mouse-modes-input/relay.lock")?;
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    run_loop(0, DiscoveryConfig::default(), &mut |event| {
+        serde_json::to_writer(&mut output, &event)?;
+        output.write_all(b"\n")?;
+        output.flush()
+    })
 }
 
 #[cfg(test)]

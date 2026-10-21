@@ -1,0 +1,12 @@
+[Unit]
+Description=Mouse Modes input connection
+
+[Socket]
+ListenStream=/run/mouse-modes-input.sock
+SocketMode=0666
+Accept=yes
+MaxConnections=8
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

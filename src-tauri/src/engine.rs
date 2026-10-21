@@ -134,7 +134,7 @@ pub fn supported_key(key: &str) -> bool {
     )
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
     pub available: bool,

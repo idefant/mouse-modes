@@ -1,6 +1,6 @@
 [package]
 name = "mouse-modes"
-version = "0.1.0"
+version = "0.1.1"
 description = "Hold a hotkey to change mouse movement into precision, speed or scrolling"
 authors = ["Mouse Modes"]
 edition = "2021"
