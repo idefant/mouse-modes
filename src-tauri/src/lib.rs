@@ -112,7 +112,12 @@ fn show(app: &tauri::AppHandle) {
     }
 }
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Tao's raw keyboard registration prevents our LL hook from receiving
+    // keys while this app is focused. The input engine owns raw mouse input.
+    #[cfg(windows)]
+    let builder = builder.device_event_filter(tauri::DeviceEventFilter::Always);
+    builder
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
         .plugin(
             tauri_plugin_autostart::Builder::new()
@@ -182,6 +187,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(windows)]
+            if let tauri::WindowEvent::Focused(false) = event {
+                if let Some(state) = window.app_handle().try_state::<AppState>() {
+                    let _ = state.engine.cancel_capture();
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
