@@ -1,4 +1,6 @@
 mod engine;
+#[cfg(target_os = "linux")]
+mod linux_tray;
 mod platform;
 pub use engine::{EngineEvent, EngineStatus, Hotkey, Settings};
 use std::{
@@ -186,22 +188,39 @@ pub fn run() {
                 engine,
                 path,
             });
-            let show_item =
-                tauri::menu::MenuItem::with_id(app, "show", "Настройки", true, None::<&str>)?;
-            let quit_item =
-                tauri::menu::MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
-            let menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
-            tauri::tray::TrayIconBuilder::new()
-                .icon(tauri::include_image!("icons/tray.png"))
-                .tooltip("Mouse Modes")
-                .menu(&menu)
-                .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => show(app),
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .build(app)?;
+            #[cfg(target_os = "linux")]
+            linux_tray::setup(app.handle())?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let show_item =
+                    tauri::menu::MenuItem::with_id(app, "show", "Настройки", true, None::<&str>)?;
+                let quit_item =
+                    tauri::menu::MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+                let menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
+                tauri::tray::TrayIconBuilder::new()
+                    .icon(tauri::include_image!("icons/tray.png"))
+                    .tooltip("Mouse Modes")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        if matches!(
+                            event,
+                            tauri::tray::TrayIconEvent::Click {
+                                button: tauri::tray::MouseButton::Left,
+                                button_state: tauri::tray::MouseButtonState::Up,
+                                ..
+                            }
+                        ) {
+                            show(tray.app_handle());
+                        }
+                    })
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => show(app),
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .build(app)?;
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
