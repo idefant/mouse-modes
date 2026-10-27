@@ -22,6 +22,7 @@ import {
 import type { EngineStatus, Hotkey, Mode, Settings } from "./settings";
 import styles from "./App.module.scss";
 import { CaptureSession } from "./captureSession";
+import { version } from "../package.json";
 const modes = [
   {
     id: "slow",
@@ -300,6 +301,7 @@ export default function App() {
           {configured} / 5 назначено{busy ? " · Применение…" : ""}
         </span>
       </footer>
+      <p className={styles.version}>Mouse Modes v{version}</p>
     </main>
   );
 }
