@@ -2,7 +2,7 @@
 
 Нужны Node.js 22.12+ и Rust stable. На Windows установите Visual Studio C++ Build Tools и WebView2. На Linux нужны заголовки GTK3, WebKitGTK 4.1, AppIndicator и OpenSSL, а для запуска — polkit и `uinput`.
 
-Зависимости Arch/Omarchy: `webkit2gtk-4.1 libappindicator-gtk3 openssl polkit`. Зависимости Ubuntu приведены в [CI](.github/workflows/check.yml).
+Зависимости Arch/Omarchy: `webkit2gtk-4.1 libappindicator-gtk3 openssl polkit`. Зависимости Ubuntu приведены в [Release](.github/workflows/release.yml).
 
 ```sh
 npm ci
@@ -32,7 +32,20 @@ npm test
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-CI проверяет Linux и Windows отдельно. Проверки на одной ОС не заменяют живую проверку другой.
+При выпуске версии Release проверяет Linux и Windows отдельно. Проверки на одной ОС не заменяют живую проверку другой.
+
+На Windows есть отдельная проверка настоящего перехвата клавиатуры:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --lib native_ -- --ignored --test-threads=1
+```
+
+Проверки запускают движок ввода, записывают F17 через `SendInput` с удержанием 350 мс,
+а также включают прокрутку по каждой оси и по обеим осям. После отпускания клавиш
+ограничение курсора должно восстановиться. Серия быстрых нажатий проверяет повторный
+вход в обработчик клавиатуры во время системных вызовов. Движение в этом тесте
+синтетическое; обработку физической мыши через Raw Input нужно проверять отдельно.
+Запускайте на свободном рабочем столе без параллельного использования клавиатуры.
 
 ## Linux: обработка ввода
 
@@ -59,7 +72,7 @@ platform::linux_native::native_tests --ignored --nocapture --test-threads=1
 
 ## Выпуск версии
 
-CI проверяет интерфейс и Rust-код и собирает приложение на Linux и Windows.
+Пайплайн Release проверяет интерфейс и Rust-код и собирает приложение на Linux и Windows. Автоматические проверки при push веток и в pull request отключены; перед отправкой изменений выполняйте проверки локально.
 Пайплайн [Release](.github/workflows/release.yml) запускается при push тега `v<semver>`.
 
 1. Добавьте в `CHANGELOG.md` непустую секцию `## [X.Y.Z] - YYYY-MM-DD` с изменениями этой версии.

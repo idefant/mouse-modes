@@ -2,16 +2,18 @@
 //! The worker owns every native resource, including restoration of temporary SPI speed.
 use crate::{EngineEvent, EngineStatus, Hotkey, Settings};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
-    mem::{size_of, zeroed},
+    mem::{size_of, size_of_val, zeroed},
     ptr::{null, null_mut},
     sync::{mpsc, Arc, Mutex},
     thread,
 };
 use windows_sys::Win32::{
     Foundation::*,
-    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+    System::{
+        LibraryLoader::GetModuleHandleW, StationsAndDesktops::*, Threading::GetCurrentThreadId,
+    },
     UI::{
         Input::{KeyboardAndMouse::*, *},
         WindowsAndMessaging::*,
@@ -19,6 +21,7 @@ use windows_sys::Win32::{
 };
 
 const WAKE: u32 = WM_APP + 71;
+const APPLY_MODES: u32 = WM_APP + 72;
 type Callback = Arc<dyn Fn(EngineEvent) + Send + Sync>;
 enum Command {
     Settings(Settings),
@@ -104,6 +107,16 @@ struct State {
     suppressed: HashSet<String>,
     capture: Option<HashSet<String>>,
     capture_invalid: bool,
+    events: mpsc::Sender<EngineEvent>,
+    status: Arc<Mutex<EngineStatus>>,
+}
+#[derive(Clone, Copy, Default)]
+struct DesiredModes {
+    speed: i32,
+    horizontal: bool,
+    vertical: bool,
+}
+struct Output {
     speed: i32,
     base_speed: Option<i32>,
     horizontal: bool,
@@ -112,10 +125,21 @@ struct State {
     accum_y: i32,
     clipped: bool,
     previous_clip: RECT,
-    events: mpsc::Sender<EngineEvent>,
-    status: Arc<Mutex<EngineStatus>>,
 }
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
+thread_local! { static OUTPUT: RefCell<Option<Output>> = const { RefCell::new(None) }; }
+thread_local! { static DESIRED: Cell<DesiredModes> = const { Cell::new(DesiredModes { speed: 0, horizontal: false, vertical: false }) }; }
+fn with_output(action: impl FnOnce(&mut Output)) -> bool {
+    let output = OUTPUT.with(|cell| cell.borrow_mut().take());
+    let Some(mut output) = output else {
+        return false;
+    };
+    // Native calls may run another window procedure or keyboard hook. Neither
+    // TLS RefCell may stay borrowed across those calls.
+    action(&mut output);
+    OUTPUT.with(|cell| *cell.borrow_mut() = Some(output));
+    true
+}
 impl State {
     fn emit_status(&self, capturing: bool) {
         self.emit_message(
@@ -148,6 +172,27 @@ impl State {
         let both = active(&hotkeys.scroll_both);
         let horizontal = both || active(&hotkeys.scroll_horizontal);
         let vertical = both || active(&hotkeys.scroll_vertical);
+        DESIRED.with(|cell| {
+            cell.set(DesiredModes {
+                speed: desired,
+                horizontal,
+                vertical,
+            });
+        });
+        // SPI, ClipCursor and SendInput can synchronously reenter the keyboard
+        // hook. Apply output after returning from the hook and releasing STATE.
+        unsafe {
+            PostThreadMessageW(GetCurrentThreadId(), APPLY_MODES, 0, 0);
+        }
+    }
+}
+impl Output {
+    fn apply(&mut self, desired_modes: DesiredModes) {
+        let DesiredModes {
+            speed: desired,
+            horizontal,
+            vertical,
+        } = desired_modes;
         unsafe {
             if desired != self.speed {
                 if desired != 0 && self.base_speed.is_none() {
@@ -193,12 +238,26 @@ impl State {
         self.horizontal = horizontal;
         self.vertical = vertical;
     }
-    // A release can be lost on the secure desktop, lock, or device removal.
-    unsafe fn reconcile_releases(&mut self) {
+}
+impl State {
+    // A release can be lost when input moves to the secure desktop or lock screen.
+    fn reconcile_key_state(&mut self, desktop_active: bool, is_down: impl Fn(i32) -> bool) {
+        if !desktop_active {
+            self.virtual_keys.clear();
+            self.held.clear();
+            self.suppressed.clear();
+            if self.capture.take().is_some() {
+                self.emit_message(false, "Capture interrupted. Record the combination again.");
+            }
+            self.modes();
+            return;
+        }
         let released: Vec<String> = self
             .virtual_keys
             .iter()
-            .filter(|(_, vk)| GetAsyncKeyState(**vk) >= 0)
+            // Suppressed keydowns do not update Windows' async key state.
+            // Only a hook keyup (or desktop reset above) can release them.
+            .filter(|(key, vk)| !self.suppressed.contains(*key) && !is_down(**vk))
             .map(|(key, _)| key.clone())
             .collect();
         if released.is_empty() {
@@ -215,6 +274,8 @@ impl State {
         }
         self.modes();
     }
+}
+impl Output {
     fn cleanup(&mut self) {
         unsafe {
             if self.clipped {
@@ -226,6 +287,32 @@ impl State {
             }
         }
     }
+}
+unsafe fn input_desktop_active() -> bool {
+    let input = OpenInputDesktop(0, 0, DESKTOP_READOBJECTS);
+    if input.is_null() {
+        return false;
+    }
+    let desktop_name = |desktop| {
+        let mut name = [0u16; 256];
+        let mut needed = 0;
+        if GetUserObjectInformationW(
+            desktop,
+            UOI_NAME,
+            name.as_mut_ptr() as _,
+            size_of_val(&name) as u32,
+            &mut needed,
+        ) == 0
+        {
+            None
+        } else {
+            Some(name)
+        }
+    };
+    let input_name = desktop_name(input);
+    let thread_name = desktop_name(GetThreadDesktop(GetCurrentThreadId()));
+    CloseDesktop(input);
+    input_name.is_some() && input_name == thread_name
 }
 fn matches_chord(chord: &Hotkey, held: &HashSet<String>) -> bool {
     !chord.keys.is_empty()
@@ -264,9 +351,9 @@ unsafe extern "system" fn keyboard(code: i32, message: WPARAM, data: LPARAM) -> 
         return CallNextHookEx(null_mut(), code, message, data);
     }
     let event = &*(data as *const KBDLLHOOKSTRUCT);
-    if event.flags & LLKHF_INJECTED != 0 {
-        return CallNextHookEx(null_mut(), code, message, data);
-    }
+    // Keyboard software, remappers and remote sessions can send injected keys
+    // (including F13-F24). We only inject mouse input ourselves, so accepting
+    // these keyboard events cannot feed our own output back into this hook.
     let down = message as u32 == WM_KEYDOWN || message as u32 == WM_SYSKEYDOWN;
     let key = key_code(event);
     let suppress = STATE.with(|cell| {
@@ -336,10 +423,38 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if message == WM_TIMER && wparam == 1 {
+    if (message == WM_INPUT_DEVICE_CHANGE && wparam == GIDC_REMOVAL as WPARAM)
+        || (message == WM_DEVICECHANGE && wparam == DBT_DEVICEREMOVECOMPLETE as WPARAM)
+    {
         STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {
-                state.reconcile_releases();
+                state.reconcile_key_state(false, |_| false);
+            }
+        });
+        return 0;
+    }
+    if message == WM_TIMER && wparam == 1 {
+        let keys = STATE.with(|cell| {
+            cell.borrow().as_ref().and_then(|state| {
+                if state.held.is_empty() && state.capture.is_none() {
+                    None
+                } else {
+                    Some(state.virtual_keys.values().copied().collect::<Vec<_>>())
+                }
+            })
+        });
+        let Some(keys) = keys else {
+            return 0;
+        };
+        // Sample Win32 outside STATE: these calls may deliver another hook event.
+        let desktop_active = input_desktop_active();
+        let down: HashMap<_, _> = keys
+            .into_iter()
+            .map(|vk| (vk, GetAsyncKeyState(vk) < 0))
+            .collect();
+        STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.reconcile_key_state(desktop_active, |vk| *down.get(&vk).unwrap_or(&true));
             }
         });
         return 0;
@@ -359,16 +474,14 @@ unsafe extern "system" fn window_proc(
             let mouse = raw.data.mouse;
             // Absolute tablet coordinates are not relative mouse displacement.
             if mouse.usFlags & MOUSE_MOVE_ABSOLUTE == 0 {
-                STATE.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
-                        if state.horizontal {
-                            state.accum_x = state.accum_x.saturating_add(mouse.lLastX);
-                            wheel(&mut state.accum_x, true);
-                        }
-                        if state.vertical {
-                            state.accum_y = state.accum_y.saturating_add(mouse.lLastY);
-                            wheel(&mut state.accum_y, false);
-                        }
+                with_output(|state| {
+                    if state.horizontal {
+                        state.accum_x = state.accum_x.saturating_add(mouse.lLastX);
+                        wheel(&mut state.accum_x, true);
+                    }
+                    if state.vertical {
+                        state.accum_y = state.accum_y.saturating_add(mouse.lLastY);
+                        wheel(&mut state.accum_y, false);
                     }
                 });
             }
@@ -415,6 +528,12 @@ unsafe fn run(
             suppressed: HashSet::new(),
             capture: None,
             capture_invalid: false,
+            events,
+            status,
+        })
+    });
+    OUTPUT.with(|s| {
+        *s.borrow_mut() = Some(Output {
             speed: 0,
             base_speed: None,
             horizontal: false,
@@ -423,8 +542,6 @@ unsafe fn run(
             accum_y: 0,
             clipped: false,
             previous_clip: zeroed(),
-            events,
-            status,
         })
     });
     let instance = GetModuleHandleW(null());
@@ -452,20 +569,40 @@ unsafe fn run(
             null(),
         )
     };
-    let hook = if hwnd.is_null() {
+    // Do not register raw keyboard input: it disables the LL keyboard hook
+    // while this process has focus (including the settings WebView).
+    let devices = [2].map(|usage| RAWINPUTDEVICE {
+        usUsagePage: 1,
+        usUsage: usage,
+        dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
+        hwndTarget: hwnd,
+    });
+    let raw_input_ready = !hwnd.is_null()
+        && RegisterRawInputDevices(
+            devices.as_ptr(),
+            devices.len() as u32,
+            size_of::<RAWINPUTDEVICE>() as u32,
+        ) != 0;
+    // Receive unplug notifications without registering raw keyboard input.
+    let mut filter: DEV_BROADCAST_DEVICEINTERFACE_W = zeroed();
+    filter.dbcc_size = size_of::<DEV_BROADCAST_DEVICEINTERFACE_W>() as u32;
+    filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+    let notifications = if hwnd.is_null() {
         null_mut()
     } else {
+        RegisterDeviceNotificationW(
+            hwnd,
+            &filter as *const _ as _,
+            DEVICE_NOTIFY_WINDOW_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES,
+        )
+    };
+    // Install last so device initialization cannot delay the hook's message pump.
+    let mut hook = if raw_input_ready {
         SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), instance, 0)
+    } else {
+        null_mut()
     };
-    let device = RAWINPUTDEVICE {
-        usUsagePage: 1,
-        usUsage: 2,
-        dwFlags: RIDEV_INPUTSINK,
-        hwndTarget: hwnd,
-    };
-    let success = !hwnd.is_null()
-        && !hook.is_null()
-        && RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) != 0;
+    let success = raw_input_ready && !hook.is_null() && !notifications.is_null();
     if !success {
         let _ = ready.send(Err(format!(
             "Windows input initialization failed: {}",
@@ -477,9 +614,29 @@ unsafe fn run(
         let _ = ready.send(Ok(GetCurrentThreadId()));
         let mut message: MSG = zeroed();
         'pump: while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
-            if message.message == WAKE {
+            if message.message == APPLY_MODES {
+                let desired = DESIRED.with(Cell::get);
+                if !with_output(|output| output.apply(desired)) {
+                    PostThreadMessageW(GetCurrentThreadId(), APPLY_MODES, 0, 0);
+                }
+            } else if message.message == WAKE {
                 while let Ok(request) = rx.try_recv() {
                     let stop = matches!(request.command, Command::Stop);
+                    if matches!(request.command, Command::Capture) {
+                        // Windows silently removes LL hooks after a timeout. An old
+                        // non-null handle does not prove that input is still arriving.
+                        let replacement =
+                            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), instance, 0);
+                        if replacement.is_null() {
+                            let _ = request.done.send(Err(format!(
+                                "Не удалось включить перехват клавиатуры: {}",
+                                std::io::Error::last_os_error()
+                            )));
+                            continue;
+                        }
+                        UnhookWindowsHookEx(hook);
+                        hook = replacement;
+                    }
                     STATE.with(|cell| {
                         let mut s = cell.borrow_mut();
                         let s = s.as_mut().unwrap();
@@ -489,6 +646,11 @@ unsafe fn run(
                                 s.modes();
                             }
                             Command::Capture => {
+                                // A fresh hook must not inherit keys whose release
+                                // was lost while the previous hook was inactive.
+                                s.held.clear();
+                                s.virtual_keys.clear();
+                                s.suppressed.clear();
                                 s.capture_invalid = false;
                                 s.capture = Some(HashSet::new());
                                 s.modes();
@@ -499,7 +661,7 @@ unsafe fn run(
                                 s.modes();
                                 s.emit_status(false);
                             }
-                            Command::Stop => s.cleanup(),
+                            Command::Stop => {}
                         }
                     });
                     let _ = request.done.send(Ok(()));
@@ -514,21 +676,30 @@ unsafe fn run(
         }
     }
     STATE.with(|cell| {
-        if let Some(mut s) = cell.borrow_mut().take() {
-            s.cleanup();
-        }
+        cell.borrow_mut().take();
     });
+    let output = OUTPUT.with(|cell| cell.borrow_mut().take());
+    if let Some(mut output) = output {
+        output.cleanup();
+    }
     if !hook.is_null() {
         UnhookWindowsHookEx(hook);
     }
+    if !notifications.is_null() {
+        UnregisterDeviceNotification(notifications);
+    }
     if !hwnd.is_null() {
-        let remove = RAWINPUTDEVICE {
+        let remove = [2].map(|usage| RAWINPUTDEVICE {
             usUsagePage: 1,
-            usUsage: 2,
+            usUsage: usage,
             dwFlags: RIDEV_REMOVE,
             hwndTarget: null_mut(),
-        };
-        RegisterRawInputDevices(&remove, 1, size_of::<RAWINPUTDEVICE>() as u32);
+        });
+        RegisterRawInputDevices(
+            remove.as_ptr(),
+            remove.len() as u32,
+            size_of::<RAWINPUTDEVICE>() as u32,
+        );
         KillTimer(hwnd, 1);
         DestroyWindow(hwnd);
     }
@@ -540,6 +711,11 @@ unsafe fn run(
 
 fn key_code(event: &KBDLLHOOKSTRUCT) -> String {
     let extended = event.flags & LLKHF_EXTENDED != 0;
+    // Programmable buttons may supply no scan code or retain the original key's
+    // scan code. The virtual key is authoritative for function keys.
+    if (VK_F1 as u32..=VK_F24 as u32).contains(&event.vkCode) {
+        return format!("F{}", event.vkCode - VK_F1 as u32 + 1);
+    }
     if event.vkCode == VK_SNAPSHOT as u32 {
         return "PrintScreen".into();
     }
@@ -639,15 +815,11 @@ fn key_code(event: &KBDLLHOOKSTRUCT) -> String {
         (0x56, _) => "IntlBackslash",
         (0x5d, true) => "ContextMenu",
         _ => {
-            return if (0x70..=0x87).contains(&event.vkCode) {
-                format!("F{}", event.vkCode - 0x6f)
-            } else {
-                format!(
-                    "WindowsScan{}{}",
-                    event.scanCode,
-                    if extended { "Extended" } else { "" }
-                )
-            }
+            return format!(
+                "WindowsScan{}{}",
+                event.scanCode,
+                if extended { "Extended" } else { "" }
+            )
         }
     };
     code.into()
@@ -711,5 +883,199 @@ mod tests {
         assert_eq!(key_code(&event), "NumpadEnter");
         event.flags = 0;
         assert_eq!(key_code(&event), "Enter");
+    }
+
+    #[test]
+    fn programmable_f17_does_not_depend_on_the_scan_code() {
+        for scan_code in [0, 0x1e, 0x68] {
+            let event = KBDLLHOOKSTRUCT {
+                vkCode: VK_F17 as u32,
+                scanCode: scan_code,
+                flags: LLKHF_INJECTED,
+                time: 0,
+                dwExtraInfo: 0,
+            };
+            assert_eq!(key_code(&event), "F17");
+        }
+    }
+
+    #[test]
+    fn injected_f17_is_suppressed_and_recorded_on_release() {
+        let (events, received) = mpsc::channel();
+        STATE.with(|cell| {
+            *cell.borrow_mut() = Some(State {
+                settings: Settings::default(),
+                held: HashSet::new(),
+                virtual_keys: HashMap::new(),
+                suppressed: HashSet::new(),
+                capture: Some(HashSet::new()),
+                capture_invalid: false,
+                events,
+                status: Arc::new(Mutex::new(EngineStatus {
+                    available: true,
+                    capturing: true,
+                    message: String::new(),
+                })),
+            });
+        });
+        let event = KBDLLHOOKSTRUCT {
+            vkCode: VK_F17 as u32,
+            scanCode: 0,
+            flags: LLKHF_INJECTED,
+            time: 0,
+            dwExtraInfo: 0,
+        };
+        unsafe {
+            let data = &event as *const _ as LPARAM;
+            assert_eq!(keyboard(HC_ACTION as i32, WM_KEYDOWN as WPARAM, data), 1);
+            assert!(received.try_recv().is_err());
+            STATE.with(|cell| {
+                let mut state = cell.borrow_mut();
+                let state = state.as_mut().unwrap();
+                // Simulate the timer while Windows still reports a suppressed
+                // injected F17 as up. Recording must wait for the real keyup.
+                state.reconcile_key_state(true, |_| false);
+                assert!(state.capture.is_some());
+                assert!(state.held.contains("F17"));
+            });
+            assert!(received.try_recv().is_err());
+            assert_eq!(keyboard(HC_ACTION as i32, WM_KEYUP as WPARAM, data), 1);
+        }
+        let captured = received.try_recv().unwrap();
+        assert!(matches!(captured, EngineEvent::Captured(h) if h == chord(&["F17"])));
+        STATE.with(|cell| {
+            let mut state = cell.borrow_mut().take().unwrap();
+            assert!(state.held.is_empty());
+            assert!(state.suppressed.is_empty());
+            assert!(state.capture.is_none());
+
+            // A desktop switch still releases suppressed keys and cancels input.
+            state.capture = Some(held(&["F17"]));
+            state.held.insert("F17".into());
+            state.suppressed.insert("F17".into());
+            state.virtual_keys.insert("F17".into(), VK_F17 as i32);
+            state.reconcile_key_state(false, |_| true);
+            assert!(state.held.is_empty());
+            assert!(state.virtual_keys.is_empty());
+            assert!(state.suppressed.is_empty());
+            assert!(state.capture.is_none());
+        });
+    }
+
+    #[test]
+    #[ignore = "Sends F17 through the live Windows input system; run on an idle desktop"]
+    fn native_injected_f17_capture_survives_timer() {
+        let (send, received) = mpsc::channel();
+        let engine = EngineHandle::start(
+            Arc::new(move |event| {
+                let _ = send.send(event);
+            }),
+            Settings::default(),
+        )
+        .unwrap();
+        engine.begin_capture().unwrap();
+        unsafe {
+            let mut input: INPUT = zeroed();
+            input.r#type = INPUT_KEYBOARD;
+            input.Anonymous.ki.wVk = VK_F17;
+            let pressed = SendInput(1, &input, size_of::<INPUT>() as i32);
+            thread::sleep(std::time::Duration::from_millis(350));
+            let still_capturing = engine.status().capturing;
+            input.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
+            let released = SendInput(1, &input, size_of::<INPUT>() as i32);
+            assert_eq!(pressed, 1, "F17 keydown injection failed");
+            assert_eq!(released, 1, "F17 keyup injection failed");
+            assert!(still_capturing, "timer interrupted the held F17 capture");
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let event = received
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("no capture result from the live Windows keyboard hook");
+            if let EngineEvent::Captured(hotkey) = event {
+                assert_eq!(hotkey, chord(&["F17"]));
+                break;
+            }
+        }
+        engine.shutdown();
+    }
+
+    #[test]
+    #[ignore = "Temporarily clips the real cursor; run on an idle desktop"]
+    fn native_scroll_release_restores_cursor() {
+        unsafe fn clip() -> (i32, i32, i32, i32) {
+            let mut rect: RECT = zeroed();
+            assert_ne!(GetClipCursor(&mut rect), 0);
+            (rect.left, rect.top, rect.right, rect.bottom)
+        }
+        unsafe fn key(vk: u16, up: bool) {
+            let mut input: INPUT = zeroed();
+            input.r#type = INPUT_KEYBOARD;
+            input.Anonymous.ki.wVk = vk;
+            input.Anonymous.ki.dwFlags = if up { KEYEVENTF_KEYUP } else { 0 };
+            assert_eq!(SendInput(1, &input, size_of::<INPUT>() as i32), 1);
+        }
+        let mut settings = Settings::default();
+        settings.hotkeys.scroll_horizontal = Some(chord(&["F15"]));
+        settings.hotkeys.scroll_vertical = Some(chord(&["F16"]));
+        settings.hotkeys.scroll_both = Some(chord(&["F15", "F16"]));
+        let original = unsafe { clip() };
+        let engine = EngineHandle::start(Arc::new(|_| {}), settings).unwrap();
+        let mut results = Vec::new();
+        for keys in [vec![VK_F15], vec![VK_F16], vec![VK_F15, VK_F16]] {
+            unsafe {
+                for &vk in &keys {
+                    key(vk, false);
+                }
+                thread::sleep(std::time::Duration::from_millis(350));
+                let held_clip = clip();
+                let mut motion: INPUT = zeroed();
+                motion.r#type = INPUT_MOUSE;
+                motion.Anonymous.mi.dwFlags = MOUSEEVENTF_MOVE;
+                motion.Anonymous.mi.dx = 50;
+                motion.Anonymous.mi.dy = 30;
+                SendInput(1, &motion, size_of::<INPUT>() as i32);
+                for &vk in keys.iter().rev() {
+                    key(vk, true);
+                }
+                thread::sleep(std::time::Duration::from_millis(150));
+                results.push((keys, held_clip, clip()));
+            }
+        }
+        // Queue down/up together: a native cursor call in the keydown callback
+        // can synchronously deliver keyup and reenter the keyboard handler.
+        let rapid = unsafe {
+            let mut inputs: [INPUT; 2] = zeroed();
+            for input in &mut inputs {
+                input.r#type = INPUT_KEYBOARD;
+                input.Anonymous.ki.wVk = VK_F15;
+            }
+            inputs[1].Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
+            let mut sent = 0;
+            for _ in 0..100 {
+                sent += SendInput(2, inputs.as_ptr(), size_of::<INPUT>() as i32);
+            }
+            thread::sleep(std::time::Duration::from_millis(150));
+            (sent, clip())
+        };
+        engine.shutdown();
+        assert_eq!(rapid.0, 200, "rapid scroll key injection failed");
+        assert_eq!(rapid.1, original, "rapid down/up left the cursor clipped");
+        for (keys, held_clip, released_clip) in results {
+            assert_eq!(
+                held_clip.2 - held_clip.0,
+                1,
+                "mode did not activate: {keys:?}"
+            );
+            assert_eq!(
+                held_clip.3 - held_clip.1,
+                1,
+                "mode did not activate: {keys:?}"
+            );
+            assert_eq!(
+                released_clip, original,
+                "cursor stayed clipped after release: {keys:?}"
+            );
+        }
     }
 }

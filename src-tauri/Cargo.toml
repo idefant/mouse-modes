@@ -1,6 +1,6 @@
 [package]
 name = "mouse-modes"
-version = "0.1.1"
+version = "0.1.2"
 description = "Hold a hotkey to change mouse movement into precision, speed or scrolling"
 authors = ["Mouse Modes"]
 edition = "2021"
@@ -16,7 +16,7 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_StationsAndDesktops"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13.2"
