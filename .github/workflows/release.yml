@@ -54,8 +54,9 @@ jobs:
         with:
           workspaces: src-tauri
           cache-on-failure: true
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev libsystemd-dev rpm libarchive-tools
+      - name: Install Linux development dependencies
+        if: runner.os == 'Linux'
+        run: bash scripts/install-linux-ci-deps.sh
       - name: Sync version from release tag
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
