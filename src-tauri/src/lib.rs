@@ -4,7 +4,10 @@ pub use engine::{EngineEvent, EngineStatus, Hotkey, Settings};
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
@@ -111,6 +114,23 @@ fn show(app: &tauri::AppHandle) {
         let _ = window.set_focus();
     }
 }
+
+#[derive(Default)]
+struct StartupVisibility {
+    engine_ready: AtomicBool,
+}
+
+impl StartupVisibility {
+    fn should_show(&self, status: &EngineStatus) -> bool {
+        if status.available {
+            self.engine_ready.store(true, Ordering::Relaxed);
+            false
+        } else {
+            !self.engine_ready.load(Ordering::Relaxed)
+        }
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
@@ -140,13 +160,16 @@ pub fn run() {
             settings.validate()?;
             settings.autostart = app.autolaunch().is_enabled().unwrap_or(false);
             let handle = app.handle().clone();
+            let startup_visibility = StartupVisibility::default();
             let callback = Arc::new(move |event: EngineEvent| match event {
                 EngineEvent::Captured(hotkey) => {
                     let _ = handle.emit("hotkey-captured", hotkey);
                 }
                 EngineEvent::Status(status) => {
-                    if !status.available {
-                        // Failed background startup must be visible to the user.
+                    // Surface failed background startup. After the engine has
+                    // worked, status changes (including lock/resume reconnects
+                    // and device rediscovery) must preserve window visibility.
+                    if startup_visibility.should_show(&status) {
                         show(&handle);
                     }
                     let _ = handle.emit("engine-status", status);
@@ -210,4 +233,34 @@ pub fn run_input_helper() -> Result<(), String> {
 #[cfg(target_os = "linux")]
 pub fn run_input_service() -> Result<(), String> {
     platform::run_service()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(available: bool) -> EngineStatus {
+        EngineStatus {
+            available,
+            capturing: false,
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn failed_background_startup_still_opens_settings() {
+        let visibility = StartupVisibility::default();
+        assert!(visibility.should_show(&status(false)));
+        assert!(visibility.should_show(&status(false)));
+        assert!(!visibility.should_show(&status(true)));
+    }
+
+    #[test]
+    fn lock_and_resume_statuses_preserve_window_visibility() {
+        let visibility = StartupVisibility::default();
+        // Ready, locked/disconnected, rediscovering devices, ready again.
+        for available in [true, false, false, true, false, true] {
+            assert!(!visibility.should_show(&status(available)));
+        }
+    }
 }
