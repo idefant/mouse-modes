@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ArrowDownUp,
   ArrowLeftRight,
@@ -82,6 +83,27 @@ export default function App() {
     }
   }
   applyRef.current = apply;
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (
+        recording === null &&
+        event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        !event.metaKey &&
+        event.code === "KeyW"
+      ) {
+        event.preventDefault();
+        if (!event.repeat) {
+          void getCurrentWindow()
+            .close()
+            .catch((e) => setError(String(e)));
+        }
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [recording]);
   useEffect(() => {
     let mounted = true;
     const cleanup: (() => void)[] = [];
